@@ -1,5 +1,6 @@
 import numpy as np
 from scipy import interpolate
+from scipy import ndimage
 
 import h5py
 from osgeo import gdal
@@ -68,16 +69,6 @@ from nansat.vrt import VRT
 
 
 def get_uint8_image(image, vmin, vmax, pmin, pmax):
-    ''' Scale image from float (or any) input array to uint8
-    Parameters
-    ----------
-        image : 2D matrix
-        vmin : float - minimum value
-        vmax : float - maximum value
-    Returns
-    -------
-        2D matrix
-    '''
     if vmin is None:
         vmin = np.nanpercentile(image, pmin)
     if vmax is None:
@@ -104,7 +95,7 @@ def laplcian_sharp(img):
 
 
 class AMSR2L1RPre(object):
-    def __init__(self, filename):
+    def __init__(self, filename, mask_res=0.1):
         self.filename = filename
         with h5py.File(filename, 'r') as f:
             self.hr_lat = f['Latitude of Observation Point for 89A'][:]
@@ -119,8 +110,8 @@ class AMSR2L1RPre(object):
             self.bt_36h = f['Brightness Temperature (res36,36.5GHz,H)'][:]
             self.bt_36v = f['Brightness Temperature (res36,36.5GHz,V)'][:]
 
-
-        pass
+        self.mask_res = mask_res
+        self.min_lon, self.min_lat, self.mask = self.get_imgage_mask(mask_res)
 
 
     def proj_to_wgs84_nsidc_sea_ice_stere_n(self, x, y, inverse=False):
@@ -140,6 +131,33 @@ class AMSR2L1RPre(object):
         else:
             dst_point = VRT.transform_coordinates(srs_src, src_points, srs_dst)
         return dst_point
+
+
+    def get_imgage_mask(self, mask_res=0.1):
+        # 1. 按照经纬度计算输入影像的包围盒
+        min_lon = self.hr_lon.min()
+        max_lon = self.hr_lon.max()
+        min_lat = self.hr_lat.min()
+        max_lat = self.hr_lat.max()
+
+        # 2. 按照指定经纬度的分辨率创建mask
+        mask_width = int(np.ceil((max_lon - min_lon) / mask_res))
+        mask_height = int(np.ceil((max_lat - min_lat) / mask_res))
+        mask = np.full((mask_height, mask_width), False, dtype=np.bool)
+
+        # 3. 填充mask
+        img_lon = self.hr_lon.copy()
+        img_lat = self.hr_lat.copy()
+        img_lon -= min_lon
+        img_lat -= min_lat
+        img_lon /= mask_res
+        img_lat /= mask_res
+        img_lon_idx = img_lon.astype(np.int)
+        img_lat_idx = img_lat.astype(np.int)
+        mask[img_lat_idx.flatten(), img_lon_idx.flatten()] = True
+        mask = ndimage.binary_dilation(mask, np.ones((9, 9)))
+        mask = ndimage.binary_erosion(mask, np.ones((11, 11)))
+        return min_lon, min_lat, mask
 
 
     def reproj_roi(self, out_path, gsd, lonw, lone, lats, latn, res='H'):
@@ -165,7 +183,16 @@ class AMSR2L1RPre(object):
         img_pixel_crd_x = np.linspace(min_x, max_x, img_width)
         img_pixel_crd_y = np.linspace(max_y, min_y, img_height)
         grid_crd_x, grid_crd_y = np.meshgrid(img_pixel_crd_x, img_pixel_crd_y)
-        # grid_lon, grid_lat = self.proj_to_wgs84_nsidc_sea_ice_stere_n(grid_crd_x, grid_crd_y, True)
+        grid_lonlat = self.proj_to_wgs84_nsidc_sea_ice_stere_n(grid_crd_x.flatten(), grid_crd_y.flatten(), True)
+        grid_lon = grid_lonlat[0]
+        grid_lat = grid_lonlat[1]
+        grid_lon_idx = (grid_lon - self.min_lon) / self.mask_res
+        grid_lat_idx = (grid_lat - self.min_lat) / self.mask_res
+        grid_lon_idx = grid_lon_idx.astype(np.int)
+        grid_lat_idx = grid_lat_idx.astype(np.int)
+        gpi = self.mask[grid_lat_idx, grid_lon_idx]
+        gpi = gpi.reshape(grid_crd_x.shape)
+
         if res == 'H':
             hr_xy = self.proj_to_wgs84_nsidc_sea_ice_stere_n(self.hr_lon.flatten(), self.hr_lat.flatten())
             hr_x = hr_xy[0].reshape(self.hr_shape)
@@ -175,6 +202,7 @@ class AMSR2L1RPre(object):
             dst_pts = np.asarray(list(zip(grid_crd_x.flatten(), grid_crd_y.flatten())))
             dst_value = interpolate.griddata(hr_pts, hr_value, dst_pts, method='linear', rescale=True)
             dst_value = dst_value.reshape(grid_crd_x.shape)
+
         else:
             lr_xy = self.proj_to_wgs84_nsidc_sea_ice_stere_n(self.lr_lon.flatten(), self.lr_lat.flatten())
             lr_x = lr_xy[0].reshape(self.lr_shape)
@@ -185,6 +213,7 @@ class AMSR2L1RPre(object):
             dst_value = interpolate.griddata(lr_pts, lr_value, dst_pts, method='cubic', rescale=True)
             dst_value = dst_value.reshape(grid_crd_x.shape)
 
+        dst_value[~gpi] = np.nan
         file_format = 'GTiff'
         driver = gdal.GetDriverByName(file_format)
         dst_ds = driver.Create(out_path, xsize=img_width, ysize=img_height, bands=1, eType=gdal.GDT_Byte)
