@@ -220,8 +220,8 @@ class AMSR2L1RPre(object):
         srs = NSR(3413)
         dst_ds.SetProjection(srs.ExportToWkt())
         dst_ds.SetGeoTransform([min_x, gsd, 0, max_y, 0, -gsd])
-        img_uint8 = get_uint8_image(dst_value, None, None, 10, 99)
-        img_uint8 = unsharp_masking_sharp(img_uint8)
+        img_uint8 = get_uint8_image(dst_value, None, None, 1, 99)
+        # img_uint8 = unsharp_masking_sharp(img_uint8)
         # img_uint8 = laplcian_sharp(img_uint8)
         dst_ds.WriteRaster(0, 0, img_width, img_height, img_uint8.tostring())
         dst_ds = None
