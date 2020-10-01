@@ -1,3 +1,8 @@
+
+# Name:    AMSR2_L1R_Pre.py
+# Purpose: reproject AMSR2 L1R data to WGS 84 / NSIDC Sea Ice Polar Stereographic
+# Created:      LiMingci at 2020.08.01
+# Modification: 
 import numpy as np
 from scipy import interpolate
 from scipy import ndimage
